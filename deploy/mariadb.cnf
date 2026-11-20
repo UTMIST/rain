@@ -1,0 +1,4 @@
+[mysqld]
+bind-address=127.0.0.1
+innodb_buffer_pool_size=1G
+innodb_lock_wait_timeout=900

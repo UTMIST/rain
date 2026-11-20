@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+/result
+/result-*
+sync.env
+people.json
+staging-api-key

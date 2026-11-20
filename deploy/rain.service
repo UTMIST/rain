@@ -1,0 +1,29 @@
+[Unit]
+Description=Rain: provision Slurm users from Misty staging
+Wants=network-online.target
+Requires=slurmdbd.service munge.service
+After=network-online.target slurmdbd.service munge.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/misty-slurm-sync/sync.env
+ExecStart=/usr/local/lib/misty-slurm-sync/venv/bin/rain
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=30s
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# useradd uses lock/backup files and atomic renames in /etc.
+ReadWritePaths=/etc
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
