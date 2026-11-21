@@ -16,8 +16,8 @@ UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 # useradd uses lock/backup files and atomic renames in /etc.
-ReadWritePaths=/etc
-ProtectHome=yes
+ReadWritePaths=/etc /home /var/lib/rain
+ProtectHome=no
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

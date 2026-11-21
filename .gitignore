@@ -7,3 +7,6 @@ dist/
 sync.env
 people.json
 staging-api-key
+.env
+.env.*
+.direnv/

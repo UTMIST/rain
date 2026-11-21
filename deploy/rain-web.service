@@ -1,0 +1,26 @@
+[Unit]
+Description=Rain: self-service compute access portal and Misty permission check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/misty-slurm-sync/sync.env
+ExecStart=/usr/local/lib/misty-slurm-sync/venv/bin/rain-web
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc /home /var/lib/rain
+ProtectHome=no
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

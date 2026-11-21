@@ -2,11 +2,12 @@
 
 `rain.service` runs the `rain` command with Python 3.10+ and no runtime dependencies.
 Every five minutes it reads the Misty staging roster and, for each active person,
-creates a local batch identity and a Slurm association on cluster `rain`, account
-`misty-staging`. Usernames are `msty-` plus the lowercase, unpadded base32 of the
-Misty person UUID. They are stable across name and email changes. The service
-does not grant SSH access, set passwords, assign admin roles, create home
-directories, or delete existing users. Offboarding is a separate admin action.
+creates a local user account and a Slurm association on cluster `rain`, account
+`misty-staging`. Usernames are `msty-` plus a clean slug derived from the person's name
+(e.g. `msty-alovelace` for Ada Lovelace), falling back to an 8-character base32 hash if
+no name is provided. Users get SSH access to the cluster with login shell `/bin/bash`
+and home directory `/home/<username>`. The service does not set passwords, assign
+admin roles, or delete existing users. Offboarding is a separate admin action.
 
 ## Build and test
 
@@ -14,6 +15,7 @@ directories, or delete existing users. Offboarding is a separate admin action.
 uv sync --locked
 uv run --locked python -m unittest discover -s tests -v
 uv run --locked rain --help
+uv run --locked rain web --help
 uv build
 ```
 
@@ -25,27 +27,19 @@ roster exports and credentials outside the checkout and out of the Nix store.
 
 ## Deploy on the Slurm host
 
-Build with `uv build` and copy the wheel and [`deploy/rain.service`](deploy/rain.service)
-to the Ubuntu Slurm host. Run the following as root from the directory containing
-those files, with uv available. Slurm, SlurmDBD, and MUNGE are host services;
-neither uv nor Nix is needed to run the installed unit.
+Use the automated deploy script [`deploy/deploy.sh`](deploy/deploy.sh):
 
 ```sh
-install -d -m 0755 /usr/local/lib/misty-slurm-sync
-# Only create the virtual environment on the first install.
-test -x /usr/local/lib/misty-slurm-sync/venv/bin/python || \
-  uv venv --no-project --python /usr/bin/python3 /usr/local/lib/misty-slurm-sync/venv
-uv --offline pip install --no-deps \
-  --python /usr/local/lib/misty-slurm-sync/venv/bin/python ./rain-0.1.0-py3-none-any.whl
-install -m 0644 rain.service /etc/systemd/system/rain.service
-systemctl daemon-reload
-systemctl enable rain.service
-systemctl restart rain.service
+# Deploy directly on the local Slurm host (elevates with sudo):
+./deploy/deploy.sh
+
+# Or deploy to a remote Slurm node over SSH:
+./deploy/deploy.sh <user@slurm-host>
 ```
 
-Use the wheel for the intended release. Leave `/etc/misty-slurm-sync/` intact
-on upgrades; for a new install, create it as root with mode `0700` and use
-[`deploy/sync.env.example`](deploy/sync.env.example) as a starting point.
+The script automatically builds the release wheel, provisions the Python environment in `/usr/local/lib/misty-slurm-sync/venv`, installs `rain` and `rain-web`, configures `/etc/misty-slurm-sync` and `/var/lib/rain/keys`, installs both systemd services (`rain.service` and `rain-web.service`), reloads the systemd daemon, and restarts the services.
+
+Leave `/etc/misty-slurm-sync/` intact on upgrades; for a new install, edit `/etc/misty-slurm-sync/sync.env` (seeded from [`deploy/sync.env.example`](deploy/sync.env.example)) to configure your staging credentials and cluster options.
 
 ## Connect a staging roster
 
@@ -96,3 +90,22 @@ To preview a local export before enabling it:
 sudo env MISTY_STAGING_ROSTER=/etc/misty-slurm-sync/people.json \
   /usr/local/lib/misty-slurm-sync/venv/bin/rain --dry-run
 ```
+
+## Access portal webpage
+
+Rain includes a lightweight, zero-dependency self-service web portal for requesting compute access and verifying permissions against Misty staging:
+
+```sh
+# Start with rain web
+rain web --port 8080
+
+# Or run with uv
+uv run rain-web --port 8080
+```
+
+The portal connects to the Misty Gateway (`MISTY_GATEWAY_URL`) using an external consumer key (`MISTY_GATEWAY_API_KEY`):
+- **Request access flow:** Users enter their UTMIST primary email. Misty Gateway dispatches a 6-digit confirmation code (`/v1/auth/email/start`). Submitting the code together with their OpenSSH public key (`/v1/auth/email/confirm`) verifies membership, validates the `misty:staging` issuer, and confirms current active status (`/v1/auth/people/{person_id}/status`).
+- **Slurm and SSH identity:** The user's stable Slurm username related to their name (`msty-<name>`, e.g. `msty-alovelace`), cluster (`rain`), account (`misty-staging`), and login shell (`/bin/bash`) are configured. Their provided SSH public key is installed in `~/.ssh/authorized_keys` and `/var/lib/rain/keys/<username>.pub` for direct SSH login into the box with Slurm.
+- **Key management:** Users can add or update their SSH public key anytime directly from the portal interface.
+- **Direct permission check:** Operators or users can directly query any Misty Person UUID to verify active status and SSH key configuration in the staging directory.
+- **Systemd service:** Deploy with [`deploy/rain-web.service`](deploy/rain-web.service).

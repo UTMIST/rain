@@ -3,6 +3,7 @@
 import argparse
 import base64
 import grp
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,10 @@ import pwd
 import re
 import stat
 import subprocess
+import sys
 import time
+from typing import Dict, Optional, Tuple
+import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -19,10 +23,33 @@ from uuid import UUID
 
 LOG = logging.getLogger("rain")
 MAX_ROSTER_BYTES = 8 * 1024 * 1024
+LOGIN_SHELL = "/bin/bash"
 NOLOGIN = "/usr/sbin/nologin"
 UID_MIN, UID_MAX = 30000, 39999
 LABEL = re.compile(r"[a-z][a-z0-9_-]{0,30}")
 KEY = re.compile(r"[!-~]{16,256}")
+DEFAULT_KEYS_DIR = os.environ.get("RAIN_KEYS_DIR", "/var/lib/rain/keys")
+
+SUPPORTED_SSH_KEY_TYPES = {
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+}
+
+
+class Person(UUID):
+    """Misty person UUID with optional name and email metadata."""
+
+    __slots__ = ("name", "email")
+
+    def __init__(self, val, name=None, email=None):
+        super().__init__(str(val))
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "email", email)
 
 
 class SyncError(Exception):
@@ -49,8 +76,14 @@ def parse_roster(raw):
         if not isinstance(row, dict) or not isinstance(row.get("active"), bool):
             raise SyncError("invalid staging person (expected boolean active)")
         value = row.get("id")
+        display_name = row.get("display_name") or row.get("name")
+        primary_email = row.get("primary_email") or row.get("email")
         try:
-            person = UUID(value) if isinstance(value, str) else None
+            person = (
+                Person(value, name=display_name, email=primary_email)
+                if isinstance(value, str)
+                else None
+            )
         except ValueError:
             person = None
         if person is None or str(person) != value or person.int == 0:
@@ -130,8 +163,208 @@ def read_export(path):
         raise SyncError("could not read the staging roster export") from exc
 
 
-def username(person):
-    return "msty-" + base64.b32encode(person.bytes).decode("ascii").rstrip("=").lower()
+def slugify_name(name: str) -> str:
+    """Convert a person's display name or email into a POSIX username slug."""
+    if not name or not isinstance(name, str):
+        return ""
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii").lower().strip()
+    if "@" in ascii_text:
+        ascii_text = ascii_text.split("@", 1)[0]
+    parts = [p for p in re.split(r"[^a-z0-9]+", ascii_text) if p]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        slug = parts[0]
+    else:
+        first_initial = parts[0][0]
+        last_name = parts[-1]
+        slug = f"{first_initial}{last_name}"
+    return re.sub(r"[^a-z0-9]", "", slug)[:20]
+
+
+def username(person=None, name=None) -> str:
+    """Generate a Slurm username related to the person's name with msty- prefix."""
+    slug = None
+    if name:
+        slug = slugify_name(name)
+    elif isinstance(person, str):
+        try:
+            u = UUID(person)
+            person = u
+        except ValueError:
+            slug = slugify_name(person)
+
+    if not slug and person is not None:
+        if isinstance(person, dict):
+            raw_name = (
+                person.get("display_name")
+                or person.get("name")
+                or person.get("primary_email")
+                or person.get("email")
+            )
+            if raw_name:
+                slug = slugify_name(raw_name)
+        elif hasattr(person, "name") and person.name:
+            slug = slugify_name(person.name)
+        elif hasattr(person, "email") and person.email:
+            slug = slugify_name(person.email)
+
+    if slug:
+        return f"msty-{slug}"
+
+    if isinstance(person, UUID):
+        digest = hashlib.sha256(person.bytes).digest()
+        return "msty-" + base64.b32encode(digest[:5]).decode("ascii").lower()
+
+    return "msty-user"
+
+
+def validate_ssh_public_key(raw_key: str) -> Tuple[bool, str, str, str]:
+    """Validate OpenSSH public key format and compute SHA256 fingerprint.
+
+    Returns:
+        (is_valid, error_message, sanitized_key, fingerprint)
+    """
+    if not isinstance(raw_key, str):
+        return False, "SSH public key must be a string.", "", ""
+    text = raw_key.strip()
+    if "PRIVATE KEY" in text:
+        return (
+            False,
+            "Do not upload private keys. Please provide your OpenSSH public key (e.g. ~/.ssh/id_ed25519.pub).",
+            "",
+            "",
+        )
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False, "SSH public key cannot be empty.", "", ""
+    if len(lines) > 1:
+        return False, "Please provide a single SSH public key line.", "", ""
+    line = lines[0]
+    if len(line) > 4096:
+        return False, "SSH public key is too long (maximum 4096 characters).", "", ""
+    parts = line.split()
+    if len(parts) < 2:
+        return (
+            False,
+            "Invalid SSH public key format. Expected: <key-type> <base64-key> [comment].",
+            "",
+            "",
+        )
+    key_type, key_b64 = parts[0], parts[1]
+    if key_type not in SUPPORTED_SSH_KEY_TYPES:
+        return (
+            False,
+            f"Unsupported SSH key type '{key_type}'. Supported: {', '.join(sorted(SUPPORTED_SSH_KEY_TYPES))}.",
+            "",
+            "",
+        )
+    try:
+        key_bytes = base64.b64decode(key_b64, validate=True)
+        if len(key_bytes) < 16:
+            return False, "SSH public key data is too short.", "", ""
+    except Exception:
+        return False, "Invalid base64 payload in SSH public key.", "", ""
+    comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+    comment = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", comment)[:100].strip()
+    sanitized = f"{key_type} {key_b64}" + (f" {comment}" if comment else "")
+    fp_digest = hashlib.sha256(key_bytes).digest()
+    fp = "SHA256:" + base64.b64encode(fp_digest).decode("ascii").rstrip("=")
+    return True, "", sanitized, fp
+
+
+def save_ssh_key(name: str, key_line: str, keys_dir: str = DEFAULT_KEYS_DIR) -> Path:
+    """Save user's public key to the central keys directory."""
+    if not LABEL.fullmatch(name):
+        raise SyncError(f"invalid username for ssh key: {name}")
+    dir_path = Path(keys_dir)
+    try:
+        dir_path.mkdir(parents=True, exist_ok=True, mode=0o755)
+    except OSError:
+        fallback = Path.home() / ".rain" / "keys"
+        try:
+            fallback.mkdir(parents=True, exist_ok=True, mode=0o700)
+            dir_path = fallback
+        except OSError:
+            import tempfile
+
+            dir_path = Path(tempfile.gettempdir()) / "rain_keys"
+            dir_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    key_path = dir_path / f"{name}.pub"
+    key_path.write_text(key_line.strip() + "\n", encoding="utf-8")
+    try:
+        key_path.chmod(0o644)
+    except OSError:
+        pass
+    return key_path
+
+
+def install_authorized_key(
+    name: str, key_line: str, home_dir: Optional[str] = None
+) -> bool:
+    """Install public key into user's ~/.ssh/authorized_keys."""
+    if not LABEL.fullmatch(name):
+        raise SyncError(f"invalid username for authorized_keys: {name}")
+    home = Path(home_dir) if home_dir else Path(f"/home/{name}")
+    if not home.is_dir():
+        try:
+            home.mkdir(parents=True, exist_ok=True, mode=0o750)
+        except OSError:
+            return False
+    ssh_dir = home / ".ssh"
+    try:
+        ssh_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        return False
+    auth_file = ssh_dir / "authorized_keys"
+    sanitized = key_line.strip()
+    try:
+        existing = ""
+        if auth_file.exists():
+            existing = auth_file.read_text(encoding="utf-8", errors="replace")
+        lines = [line.strip() for line in existing.splitlines() if line.strip()]
+        if sanitized not in lines:
+            lines.append(sanitized)
+            auth_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            auth_file.chmod(0o600)
+            ssh_dir.chmod(0o700)
+        except OSError:
+            pass
+
+        try:
+            entry = pwd.getpwnam(name)
+            if os.geteuid() == 0:
+                os.chown(ssh_dir, entry.pw_uid, entry.pw_gid)
+                os.chown(auth_file, entry.pw_uid, entry.pw_gid)
+        except (KeyError, OSError, PermissionError):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def get_ssh_key_info(
+    name: str, keys_dir: str = DEFAULT_KEYS_DIR
+) -> Optional[Dict[str, str]]:
+    """Return key and fingerprint for a user if registered."""
+    candidates = [
+        Path(keys_dir) / f"{name}.pub",
+        Path.home() / ".rain" / "keys" / f"{name}.pub",
+        Path(f"/home/{name}/.ssh/authorized_keys"),
+    ]
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                content = cand.read_text(encoding="utf-8", errors="replace")
+                for line in content.splitlines():
+                    valid, _, san, fp = validate_ssh_public_key(line)
+                    if valid:
+                        return {"key": san, "fingerprint": fp}
+            except OSError:
+                pass
+    return None
 
 
 def run(*args):
@@ -171,8 +404,8 @@ def local_user_exists(name, person):
         not private_group
         or not UID_MIN <= entry.pw_uid <= UID_MAX
         or entry.pw_gecos != f"misty-staging={person}"
-        or entry.pw_shell != NOLOGIN
-        or entry.pw_dir != "/nonexistent"
+        or entry.pw_shell != LOGIN_SHELL
+        or entry.pw_dir != f"/home/{name}"
     ):
         raise SyncError("refusing to reuse a conflicting Linux user")
     return True
@@ -181,13 +414,13 @@ def local_user_exists(name, person):
 def add_local_user(name, person):
     run(
         "/usr/sbin/useradd",
-        "-M",
+        "-m",
         "-U",
         "-l",
         "-d",
-        "/nonexistent",
+        f"/home/{name}",
         "-s",
-        NOLOGIN,
+        LOGIN_SHELL,
         "-c",
         f"misty-staging={person}",
         "-K",
@@ -203,7 +436,7 @@ def add_local_user(name, person):
     )
 
 
-def reconcile(people, cluster, account, dry_run=False):
+def reconcile(people, cluster, account, dry_run=False, keys_dir=DEFAULT_KEYS_DIR):
     accounts = run(
         SACCTMGR,
         "-nP",
@@ -251,6 +484,10 @@ def reconcile(people, cluster, account, dry_run=False):
                             f"Account={account}",
                         )
                 LOG.info("%s %s", "would provision" if dry_run else "provisioned", name)
+            if not dry_run:
+                key_info = get_ssh_key_info(name, keys_dir=keys_dir)
+                if key_info:
+                    install_authorized_key(name, key_info["key"])
         except SyncError as exc:
             LOG.error("%s: %s", name, exc)
             ok = False
@@ -264,6 +501,10 @@ def reconcile(people, cluster, account, dry_run=False):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "web":
+        from rain import web
+
+        return web.main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="run one sync and exit")
     parser.add_argument(
