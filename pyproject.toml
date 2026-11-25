@@ -4,7 +4,15 @@ version = "0.1.0"
 description = "Provision Slurm batch identities from Misty staging"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115,<1",
+    "pydantic>=2,<3",
+    "python-multipart>=0.0.22,<1",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = ["httpx", "pytest", "schemathesis>=4,<5"]
 
 [project.scripts]
 rain = "rain:main"

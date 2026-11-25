@@ -114,10 +114,10 @@ fi
 # 3. Install wheel
 echo "--> Installing Rain package into virtual environment..."
 if command -v uv >/dev/null 2>&1; then
-  uv --offline pip install --no-deps --python "${VENV_PYTHON}" "${WHEEL_PATH}" || \
-    uv pip install --no-deps --python "${VENV_PYTHON}" "${WHEEL_PATH}"
+  uv --offline pip install --python "${VENV_PYTHON}" "${WHEEL_PATH}" || \
+    uv pip install --python "${VENV_PYTHON}" "${WHEEL_PATH}"
 else
-  "${VENV_PYTHON}" -m pip install --no-deps "${WHEEL_PATH}"
+  "${VENV_PYTHON}" -m pip install "${WHEEL_PATH}"
 fi
 
 # 4. Setup directories

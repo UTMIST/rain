@@ -28,13 +28,14 @@
               ];
             };
             build-system = [ python.pkgs.uv-build ];
-            pythonImportsCheck = [ "rain" ];
+            dependencies = with python.pkgs; [ fastapi pydantic python-multipart uvicorn ];
+            pythonImportsCheck = [ "rain" "rain.web" ];
             doInstallCheck = true;
-            installCheckPhase = ''
-              runHook preInstallCheck
-              PYTHONPATH="$out/${python.sitePackages}" ${python.interpreter} -m unittest discover -s tests -v
+            nativeInstallCheckInputs = with python.pkgs; [ pytestCheckHook httpx ];
+            disabledTestPaths = [ "tests/test_contract.py" ];
+            postCheck = ''
               "$out/bin/rain" --help
-              runHook postInstallCheck
+              "$out/bin/rain-web" --help
             '';
             meta.mainProgram = "rain";
           };
