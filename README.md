@@ -8,7 +8,7 @@ uv run --locked rain web --help
 uv build
 ```
 
-## Deploy on the Slurm 
+## Deploy on Slurm 
 
 Use the automated deploy script [`deploy/deploy.sh`](deploy/deploy.sh):
 
