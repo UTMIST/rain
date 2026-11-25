@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 from uuid import UUID
@@ -198,6 +199,16 @@ class SshKeyTests(unittest.TestCase):
 
 
 class ReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lock = patch.object(sync, "PROVISION_LOCK", Path(tmp.name) / "provision.lock")
+        lock.start()
+        self.addCleanup(lock.stop)
+        passwd = patch.object(sync.pwd, "getpwall", return_value=[])
+        self.passwd = passwd.start()
+        self.addCleanup(passwd.stop)
+
     @patch.object(sync, "add_local_user")
     @patch.object(sync, "local_user_exists", return_value=False)
     @patch.object(sync, "run")
@@ -254,6 +265,17 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(sync.SyncError, "not registered"):
             sync.reconcile([ACTIVE], "rain", "misty-staging")
         run.assert_called_once()
+
+    @patch.object(sync, "local_user_exists", return_value=True)
+    @patch.object(sync, "run")
+    def test_keeps_existing_login_and_association_after_name_change(self, run, exists):
+        login = "msty-existing"
+        self.passwd.return_value = [SimpleNamespace(pw_name=login, pw_gecos=f"misty-staging={ACTIVE}")]
+        run.side_effect = [f"|\n{login}|\n", f"{login}|None\n"]
+
+        self.assertEqual(sync.provision_login(ACTIVE, "New Name", "rain", "misty-staging"), login)
+        exists.assert_called_once_with(login, ACTIVE)
+        self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":

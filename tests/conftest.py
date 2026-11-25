@@ -41,15 +41,32 @@ def gateway():
 
 
 @pytest.fixture
-def app(gateway, tmp_path):
+def slurm_commands():
+    def command(*args):
+        if args[1:4] == ("-nP", "show", "assoc"):
+            return "|\n"
+        if args[1:4] == ("-nP", "show", "user"):
+            return "root|Administrator\n"
+        if args[1:4] == ("-i", "add", "user"):
+            return ""
+        raise AssertionError(f"Unexpected command in test: {args}")
+
+    with patch("rain.run", side_effect=command) as run:
+        yield run
+
+
+@pytest.fixture
+def app(gateway, slurm_commands, tmp_path):
     # Never read or write real keys or provision system accounts in tests.
     with (
         patch("rain.local_user_exists", return_value=True),
         patch("rain.add_local_user", side_effect=AssertionError("unexpected useradd")),
         patch("rain.install_authorized_key", return_value=True),
         patch("rain.get_ssh_key_info", return_value=None),
+        patch("rain.pwd.getpwall", return_value=[]),
+        patch("rain.PROVISION_LOCK", tmp_path / "provision.lock"),
     ):
-        yield create_app(gateway, keys_dir=tmp_path)
+        yield create_app(gateway, keys_dir=tmp_path / "keys")
 
 
 @pytest.fixture

@@ -1,7 +1,7 @@
 [Unit]
 Description=Rain: self-service compute access portal and Misty permission check
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target slurmdbd.service munge.service
+After=network-online.target slurmdbd.service munge.service
 
 [Service]
 Type=simple
@@ -20,7 +20,7 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

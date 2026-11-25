@@ -129,6 +129,7 @@ class Approval(Cluster, Confirmation):
     ok: Literal[True] = True
     status: Literal["approved"] = "approved"
     slurm_username: str
+    slurm_associated: bool
     ssh_key_configured: bool
     ssh_key_fingerprint: str | None
 
@@ -137,20 +138,22 @@ class Error(BaseModel):
     detail: str
 
 
-def configure_key(username, person_id, key, keys_dir):
+def configure_access(person_id, name, key, *, cluster, account, keys_dir):
     try:
-        # Check ownership before writing a key to an existing account or its key file.
-        if not rain.local_user_exists(username, person_id):
-            if os.geteuid() != 0:
-                raise HTTPException(503, "The local account has not been provisioned.")
-            rain.add_local_user(username, person_id)
+        username = rain.provision_login(person_id, name, cluster, account)
+    except rain.UserConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except rain.SyncError as exc:
+        rain.LOG.error("Could not provision login for %s: %s", person_id, exc)
+        raise HTTPException(503, "Could not provision Slurm access. Request a new code to retry.") from exc
+
+    try:
         rain.save_ssh_key(username, key, keys_dir=keys_dir)
         if not rain.install_authorized_key(username, key):
             raise HTTPException(503, "Could not install the SSH public key.")
-    except rain.SyncError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except OSError as exc:
+    except (OSError, rain.SyncError) as exc:
         raise HTTPException(503, "Could not save the SSH public key.") from exc
+    return username
 
 
 def create_app(misty: MistyClient, *, cluster=DEFAULT_CLUSTER, account=DEFAULT_ACCOUNT, keys_dir=rain.DEFAULT_KEYS_DIR):
@@ -199,12 +202,13 @@ def create_app(misty: MistyClient, *, cluster=DEFAULT_CLUSTER, account=DEFAULT_A
             raise HTTPException(403, "Unexpected authentication issuer.")
         if not eligibility(person.person_id).active:
             raise HTTPException(403, "Misty account is not currently active.")
-        username = rain.username(person.person_id, name=data.name)
         if key:
-            configure_key(username, person.person_id, key, keys_dir)
+            username = configure_access(person.person_id, data.name, key, keys_dir=keys_dir, **target)
+        else:
+            username = rain.username(person.person_id, name=data.name)
         return Approval(
             **person.model_dump(), **target, slurm_username=username,
-            ssh_key_configured=key is not None, ssh_key_fingerprint=fingerprint,
+            slurm_associated=bool(key), ssh_key_configured=bool(key), ssh_key_fingerprint=fingerprint,
         )
 
     @api.post("/api/check-permissions")

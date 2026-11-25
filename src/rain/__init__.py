@@ -2,6 +2,8 @@
 
 import argparse
 import base64
+from contextlib import contextmanager, nullcontext
+from fcntl import LOCK_EX, flock
 import grp
 import hashlib
 import json
@@ -53,6 +55,10 @@ class Person(UUID):
 
 
 class SyncError(Exception):
+    pass
+
+
+class UserConflict(SyncError):
     pass
 
 
@@ -389,6 +395,31 @@ def run(*args):
 
 
 SACCTMGR = "/usr/bin/sacctmgr"
+PROVISION_LOCK = "/var/lib/rain/provision.lock"
+
+
+@contextmanager
+def provisioning_lock():
+    """Serialize identity creation across the portal and roster sync."""
+    try:
+        fd = os.open(PROVISION_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "r+") as lock:
+            flock(lock, LOCK_EX)
+            yield
+    except OSError as exc:
+        raise SyncError("could not lock account provisioning") from exc
+
+
+def provisioned_username(person, name=None):
+    """Reuse the login tied to this Misty UUID even if the supplied name changed."""
+    marker = f"misty-staging={person}"
+    matches = [
+        entry.pw_name for entry in pwd.getpwall()
+        if entry.pw_gecos == marker and entry.pw_name.startswith("msty-")
+    ]
+    if len(matches) > 1:
+        raise UserConflict("multiple Linux users match this Misty identity")
+    return matches[0] if matches else username(person, name=name)
 
 
 def local_user_exists(name, person):
@@ -407,7 +438,7 @@ def local_user_exists(name, person):
         or entry.pw_shell != LOGIN_SHELL
         or entry.pw_dir != f"/home/{name}"
     ):
-        raise SyncError("refusing to reuse a conflicting Linux user")
+        raise UserConflict("refusing to reuse a conflicting Linux user")
     return True
 
 
@@ -436,61 +467,76 @@ def add_local_user(name, person):
     )
 
 
-def reconcile(people, cluster, account, dry_run=False, keys_dir=DEFAULT_KEYS_DIR):
-    accounts = run(
-        SACCTMGR,
-        "-nP",
-        "show",
-        "assoc",
-        "where",
-        f"Cluster={cluster}",
-        f"Account={account}",
-        "format=User%32,Partition%32",
-    )
-    associations = set(tuple(line.split("|")) for line in accounts.splitlines())
-    if ("", "") not in associations:
-        raise SyncError(
-            f"Slurm account {account} is not registered on cluster {cluster}"
+class SlurmAccount:
+    """Provision ordinary members of an existing Slurm account."""
+
+    def __init__(self, cluster, account):
+        if not LABEL.fullmatch(cluster) or not LABEL.fullmatch(account):
+            raise SyncError("invalid Slurm cluster or account name")
+        self.cluster = cluster
+        self.account = account
+        accounts = run(
+            SACCTMGR, "-nP", "show", "assoc", "where", f"Cluster={cluster}",
+            f"Account={account}", "format=User%32,Partition%32",
         )
-    users = dict(
-        line.split("|", 1)
-        for line in run(
-            SACCTMGR, "-nP", "show", "user", "format=User%32,Admin"
-        ).splitlines()
-        if "|" in line
-    )
+        self.associations = {tuple(line.split("|")) for line in accounts.splitlines()}
+        if ("", "") not in self.associations:
+            raise SyncError(
+                f"Slurm account {account} is not registered on cluster {cluster}"
+            )
+        self.users = dict(
+            line.split("|", 1)
+            for line in run(
+                SACCTMGR, "-nP", "show", "user", "format=User%32,Admin"
+            ).splitlines()
+            if "|" in line
+        )
+
+    def provision(self, person, name=None, *, dry_run=False):
+        login = provisioned_username(person, name)
+        if not LABEL.fullmatch(login):
+            raise UserConflict("invalid Linux username for this Misty identity")
+        local_exists = local_user_exists(login, person)
+        if login in self.users and (not local_exists or self.users[login].lower() != "none"):
+            raise UserConflict("refusing to reuse a conflicting Slurm user")
+        needs_assoc = (login, "") not in self.associations
+        if not dry_run:
+            if not local_exists:
+                add_local_user(login, person)
+            if needs_assoc:
+                run(
+                    SACCTMGR, "-i", "add", "user", login,
+                    f"Cluster={self.cluster}", f"Account={self.account}",
+                )
+                self.associations.add((login, ""))
+                self.users[login] = "None"
+        return login, not local_exists or needs_assoc
+
+
+def provision_login(person, name, cluster, account):
+    with provisioning_lock():
+        login, _ = SlurmAccount(cluster, account).provision(person, name)
+        return login
+
+
+def reconcile(people, cluster, account, dry_run=False, keys_dir=DEFAULT_KEYS_DIR):
     ok = True
     changes = 0
-    for person in people:
-        name = username(person)
-        try:
-            local_exists = local_user_exists(name, person)
-            if name in users and (not local_exists or users[name].lower() != "none"):
-                raise SyncError("refusing to reuse a conflicting Slurm user")
-            needs_assoc = (name, "") not in associations
-            if not local_exists or needs_assoc:
-                changes += 1
+    with nullcontext() if dry_run else provisioning_lock():
+        target = SlurmAccount(cluster, account)
+        for person in people:
+            try:
+                name, changed = target.provision(person, dry_run=dry_run)
+                if changed:
+                    changes += 1
+                    LOG.info("%s %s", "would provision" if dry_run else "provisioned", name)
                 if not dry_run:
-                    if not local_exists:
-                        add_local_user(name, person)
-                    if needs_assoc:
-                        run(
-                            SACCTMGR,
-                            "-i",
-                            "add",
-                            "user",
-                            name,
-                            f"Cluster={cluster}",
-                            f"Account={account}",
-                        )
-                LOG.info("%s %s", "would provision" if dry_run else "provisioned", name)
-            if not dry_run:
-                key_info = get_ssh_key_info(name, keys_dir=keys_dir)
-                if key_info:
-                    install_authorized_key(name, key_info["key"])
-        except SyncError as exc:
-            LOG.error("%s: %s", name, exc)
-            ok = False
+                    key_info = get_ssh_key_info(name, keys_dir=keys_dir)
+                    if key_info:
+                        install_authorized_key(name, key_info["key"])
+            except SyncError as exc:
+                LOG.error("%s: %s", person, exc)
+                ok = False
     LOG.info(
         "staging roster: %d active, %d needing changes, %s",
         len(people),

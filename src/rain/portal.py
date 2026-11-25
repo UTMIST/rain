@@ -67,4 +67,5 @@ def approved(result, hostname):
   <dt>Key fingerprint</dt><dd><code>{escape(result.ssh_key_fingerprint)}</code></dd>
 </dl>
 <p>Connect with <code>ssh {escape(result.slurm_username)}@{escape(hostname)}</code>.</p>
+<p>Submit jobs with <code>sbatch --account={escape(result.account)} job.sh</code>.</p>
 """)
