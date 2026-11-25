@@ -114,10 +114,18 @@ fi
 # 3. Install wheel
 echo "--> Installing Rain package into virtual environment..."
 if command -v uv >/dev/null 2>&1; then
-  uv --offline pip install --python "${VENV_PYTHON}" "${WHEEL_PATH}" || \
-    uv pip install --python "${VENV_PYTHON}" "${WHEEL_PATH}"
+  uv --offline pip install --reinstall-package rain --python "${VENV_PYTHON}" "${WHEEL_PATH}" || \
+    uv pip install --reinstall-package rain --python "${VENV_PYTHON}" "${WHEEL_PATH}"
 else
+  if ! "${VENV_PYTHON}" -m pip --version >/dev/null 2>&1; then
+    echo "--> Bootstrapping pip in ${VENV_DIR}..."
+    if ! "${VENV_PYTHON}" -m ensurepip --upgrade; then
+      echo "ERROR: Could not bootstrap pip. Install venv support for ${PYTHON_BIN} (python3-venv on Debian/Ubuntu), or make uv available to sudo, then rerun." >&2
+      exit 1
+    fi
+  fi
   "${VENV_PYTHON}" -m pip install "${WHEEL_PATH}"
+  "${VENV_PYTHON}" -m pip install --force-reinstall --no-deps "${WHEEL_PATH}"
 fi
 
 # 4. Setup directories
@@ -173,15 +181,12 @@ if [[ "$NO_RESTART" -ne 1 ]] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
 
   echo "--> Enabling and restarting services..."
-  if systemctl list-unit-files | grep -q "rain\.service"; then
-    systemctl enable rain.service
-    systemctl restart rain.service || echo "WARNING: rain.service restart had non-zero exit (check configuration)"
-  fi
-
-  if systemctl list-unit-files | grep -q "rain-web\.service"; then
-    systemctl enable rain-web.service
-    systemctl restart rain-web.service || echo "WARNING: rain-web.service restart had non-zero exit"
-  fi
+  for service in rain.service rain-web.service; do
+    if [[ $(systemctl show --property=LoadState --value "${service}") == loaded ]]; then
+      systemctl enable "${service}"
+      systemctl restart "${service}"
+    fi
+  done
 fi
 
 echo "======================================================================"
