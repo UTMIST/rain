@@ -28,6 +28,7 @@ def page(content, error="", status=200):
 def email_form(error="", status=200):
     return page(
         """
+<img src="/ultrasonic-cleaner.png" width="425" height="340" alt="Stainless-steel ultrasonic cleaner with its lid open">
 <p>Verify your Misty account to register an SSH key for UTMIST compute access.</p>
 <form method="post" action="/request-code">
   <p><label>Misty email <input type="email" name="email" autocomplete="email" required></label></p>

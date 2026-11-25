@@ -11,6 +11,7 @@ from urllib.request import Request as GatewayRequest, build_opener
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, StrictBool, StringConstraints, ValidationError
 import uvicorn
 
@@ -222,6 +223,10 @@ def create_app(misty: MistyClient, *, cluster=DEFAULT_CLUSTER, account=DEFAULT_A
     @app.get("/index.html", include_in_schema=False)
     def home():
         return portal.email_form()
+
+    @app.get("/ultrasonic-cleaner.png", include_in_schema=False)
+    def home_image():
+        return FileResponse(Path(__file__).with_name("ultrasonic-cleaner.png"))
 
     @app.post("/request-code", include_in_schema=False)
     def request_form(request: Request, email: Annotated[str, Form()] = ""):

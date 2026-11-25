@@ -24,6 +24,7 @@
                 ./pyproject.toml
                 ./README.md
                 (pythonSources ./src)
+                ./src/rain/ultrasonic-cleaner.png
                 (pythonSources ./tests)
               ];
             };
